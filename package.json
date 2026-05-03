@@ -1,0 +1,33 @@
+{
+  "name": "genlayer-cli-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing GenLayer CLI and GenVM linter commands.",
+  "type": "module",
+  "bin": {
+    "genlayer-cli-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prepack": "npm run build",
+    "smoke": "node scripts/smoke.mjs",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.21.0",
+    "genlayer-js": "^1.1.7",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.12",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
