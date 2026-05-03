@@ -204,27 +204,109 @@ Supported chains:
 - `testnetAsimov`
 - `testnetBradbury`
 
-## Example AI Prompts
+## Agent Setup Examples
 
-Check setup:
+Use the same MCP server definition for coding agents that support MCP over stdio. Replace the private key with your own testnet/local key, or leave it invalid if you want `genlayer_deploy` to generate a fresh key during deploy.
 
-```text
-Use MCP tool check_tools from genlayer-cli and tell me whether deploy can use the configured private key.
-```
+### Codex
 
-Lint a contract:
+Add this MCP server to your Codex MCP configuration:
 
-```text
-Use MCP tool genvm_lint with:
+```json
 {
-  "args": ["check", "E:\\path\\to\\contract.py"]
+  "mcpServers": {
+    "genlayer-cli": {
+      "command": "npx",
+      "args": ["-y", "genlayer-cli-mcp"],
+      "env": {
+        "GENLAYER_PRIVATE_KEY": "0x_your_private_key_here"
+      }
+    }
+  }
 }
 ```
 
-Deploy with automatic private key fallback:
+Suggested Codex prompt:
 
 ```text
-Use MCP tool genlayer_deploy. If the MCP config private key is invalid, generate a new private key and deploy with it automatically.
+Use MCP tool check_tools from genlayer-cli and tell me whether deploy can use the configured private key.
+
+Then lint my GenLayer contract with genvm_lint.
+
+If lint passes, deploy it with genlayer_deploy using:
+{
+  "contractPath": "E:\\path\\to\\contract.py",
+  "chain": "localnet",
+  "rpcUrl": "http://localhost:4000/api",
+  "autoFundLocalnet": true,
+  "waitForReceipt": true,
+  "receiptStatus": "ACCEPTED"
+}
+```
+
+### Antigravity
+
+Add the MCP server in Antigravity's MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "genlayer-cli": {
+      "command": "npx",
+      "args": ["-y", "genlayer-cli-mcp"],
+      "env": {
+        "GENLAYER_PRIVATE_KEY": "0x_your_private_key_here"
+      }
+    }
+  }
+}
+```
+
+Suggested Antigravity prompt:
+
+```text
+Use the genlayer-cli MCP server.
+
+First call check_tools.
+Then run genvm_lint on:
+{
+  "args": ["check", "E:\\path\\to\\contract.py"]
+}
+
+If the contract is valid, call genlayer_deploy. If the configured MCP private key is invalid, let the MCP tool generate a new private key and deploy with it automatically.
+```
+
+### Claude Code
+
+Add the server with Claude Code's MCP add command:
+
+```powershell
+claude mcp add genlayer-cli -- npx -y genlayer-cli-mcp
+```
+
+If your Claude Code setup supports environment variables in MCP config, add:
+
+```json
+{
+  "GENLAYER_PRIVATE_KEY": "0x_your_private_key_here"
+}
+```
+
+Alternative local-source command:
+
+```powershell
+claude mcp add genlayer-cli -- node E:\genlayer-cli-mcp\dist\index.js
+```
+
+Suggested Claude Code prompt:
+
+```text
+Use the genlayer-cli MCP server.
+
+1. Call check_tools.
+2. Run genvm_lint for E:\path\to\contract.py.
+3. If lint succeeds, deploy with genlayer_deploy.
+4. If the private key in MCP config is missing or invalid, generate a new private key and deploy with that generated key in the same tool call.
 
 Arguments:
 {
