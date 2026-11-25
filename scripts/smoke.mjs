@@ -30,6 +30,19 @@ try {
   });
   console.log(JSON.stringify({ genlayer_networks: networks.content }, null, 2));
 
+  const account = await client.callTool({
+    name: "genlayer_account",
+    arguments: {}
+  });
+  const accountInfo = JSON.parse(account.content[0].text);
+  console.log(
+    JSON.stringify(
+      { genlayer_account: { ok: accountInfo.ok, keystoreAccounts: accountInfo.keystoreAccounts?.length } },
+      null,
+      2
+    )
+  );
+
   const genlayerVersion = await client.callTool({
     name: "genlayer",
     arguments: {

@@ -8,7 +8,8 @@ It exposes:
 - `genvm_lint`: access to `genvm-lint`
 - `genlayer_deploy`: deploys contracts with `genlayer-js`
 - `check_tools`: verifies local tool availability and private key config
-- `genlayer_networks`, `genlayer_estimate_fees`, `genlayer_call`, `genlayer_write`, `genlayer_transaction`, `genlayer_contract_info`, `genlayer_transaction_action`: structured `genlayer-js` tools
+- `genlayer_networks`, `genlayer_estimate_fees`, `genlayer_call`, `genlayer_simulate_write`, `genlayer_write`, `genlayer_transaction`, `genlayer_contract_info`, `genlayer_transaction_action`, `genlayer_account`, `genlayer_fund_account`, `genlayer_transfer`, `genlayer_staking_info`: structured `genlayer-js` tools
+- `genlayer_lint_contract`: `genvm-lint` on one contract file with a JSON report
 
 The server uses stdio transport and executes commands with `spawn(command, args)`.
 
@@ -211,17 +212,25 @@ Fees: public networks have the fee policy enabled, so a deploy with no fee depos
 
 ### SDK tools (genlayer-js 2.x)
 
-Structured tools that talk to the network through `genlayer-js` and return JSON. They take `chain` (default `localnet`), optional `rpcUrl`, and `timeoutMs`. Signing tools use `privateKey` or `GENLAYER_PRIVATE_KEY`; read-only tools need no key.
+Structured tools that talk to the network through `genlayer-js` and return JSON. They take `chain` (default `localnet`), optional `rpcUrl`, and `timeoutMs`. Read-only tools need no key.
+
+Signing tools resolve the signer in this order: `privateKey` input, `account` input (a GenLayer CLI keystore account name), `GENLAYER_PRIVATE_KEY`, then the active CLI account. Keystore accounts must be unlocked (`genlayer account unlock --account <name>`); the key is read from the OS keychain through the optional `keytar` dependency and is never returned unless `genlayer_deploy` is called with `exposePrivateKey`. `genlayer_deploy` generates a fresh key only when none of these resolve.
 
 | Tool | Changes state | Purpose |
 | --- | --- | --- |
 | `genlayer_networks` | no | List built-in networks: chain id, RPC URL, explorer, protocol contract addresses. |
 | `genlayer_estimate_fees` | no | Estimate transaction fees. Returns a `fees` object for `genlayer_deploy` / `genlayer_write`. With `contractAddress` and `method` it sizes the estimate from a write simulation (Studio and localnet only). |
 | `genlayer_call` | no | Call a read-only contract method. |
+| `genlayer_simulate_write` | no | Dry-run a write: result, fee estimate, simulation receipt. Studio and localnet only. |
 | `genlayer_write` | yes | Send a transaction to a contract method. Estimates fees automatically; `ok` is true only when consensus accepted the transaction. |
 | `genlayer_transaction` | no | Inspect a transaction: status, execution result, plus optional `include` sections `lifecycle`, `trace`, `appeal`, `triggered`, `queue`. |
 | `genlayer_contract_info` | no | Schema of a deployed contract (`contractAddress`, optional `includeCode`) or of a local file (`contractPath`, Studio and localnet only). |
-| `genlayer_transaction_action` | yes | `appeal`, `finalize`, or `cancel` a transaction. Appeals spend funds. |
+| `genlayer_transaction_action` | yes | `appeal`, `finalize`, `cancel`, `topUpFees`, or `topUpAndAppeal` a transaction. Appeals and top-ups spend funds. |
+| `genlayer_account` | no | Address and GEN balance of an account, plus keystore accounts and their unlocked state. |
+| `genlayer_fund_account` | yes | Mint test GEN with the `sim_fundAccount` faucet. Localnet and Studio networks only. |
+| `genlayer_transfer` | yes | Send GEN to an address. `amount` is in GEN, e.g. `"0.5"`. |
+| `genlayer_staking_info` | no | Staking reads on testnets: `epoch`, `validators`, `validator`, `delegation`, `quarantined`, `banned`. |
+| `genlayer_lint_contract` | no | Run `genvm-lint` (`check`, `lint`, `validate`, `typecheck`, `schema`) on a contract file and return the JSON report. |
 
 Arguments (`args`, `kwargs`) are plain JSON. Use string prefixes for types JSON lacks: `"addr#<40 hex>"` for an address, `"b#<hex>"` for bytes, `"int#<digits>"` for integers beyond 2^53.
 
@@ -234,7 +243,7 @@ Arguments (`args`, `kwargs`) are plain JSON. Use string prefixes for types JSON 
 }
 ```
 
-Staking, vesting, custom network profiles, and keystore accounts stay on the `genlayer` CLI tool, for example `{"args": ["staking", "validators"]}` or `{"args": ["network", "list"]}`.
+Staking and vesting transactions, custom network profiles, and keystore management stay on the `genlayer` CLI tool, for example `{"args": ["staking", "validators"]}` or `{"args": ["network", "list"]}`.
 
 ## Agent Setup Examples
 
@@ -356,3 +365,5 @@ Arguments:
 This MCP server intentionally exposes full GenLayer command access. AI agents can run state-changing commands such as `deploy`, `write`, `up`, `stop`, and `init`.
 
 Do not put a mainnet private key in MCP config unless you trust the AI client and all enabled tools.
+
+Signing tools fall back to the active unlocked GenLayer CLI keystore account. Any agent connected to this server can therefore sign with that account without a key in the MCP config. Lock accounts you do not want agents to use (`genlayer account lock --account <name>`), or remove the optional `keytar` dependency to disable the fallback.
