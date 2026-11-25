@@ -8,7 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createAccount, createClient, generatePrivateKey, isSuccessful } from "genlayer-js";
 import { localnet, studioDevnet, studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
-import { CalldataAddress } from "genlayer-js/types";
+import { CalldataAddress, transactionsStatusNumberToName } from "genlayer-js/types";
 import type { CalldataEncodable } from "genlayer-js/types";
 import { z } from "zod";
 
@@ -376,8 +376,8 @@ async function deployWithSdk(input: z.infer<typeof deployInputSchema>) {
       ok: succeeded,
       error: succeeded
         ? undefined
-        : `Deploy transaction was not accepted: status=${receipt?.statusName ?? "unknown"}, executionResult=${receipt?.txExecutionResultName ?? "unknown"}`,
-      transactionStatus: receipt?.statusName ?? receipt?.status,
+        : `Deploy transaction was not accepted: status=${statusNameOf(receipt) ?? "unknown"}, executionResult=${receipt?.txExecutionResultName ?? "unknown"}`,
+      transactionStatus: statusNameOf(receipt),
       executionResult: receipt?.txExecutionResultName,
       contractPath,
       chain: input.chain,
@@ -558,6 +558,20 @@ const weiSchema = z
   .string()
   .regex(/^\d+$/, "Expected a non-negative integer string in wei.")
   .optional();
+
+// Studio receipts carry only the numeric status; contract networks also set statusName.
+function statusNameOf(transaction: { statusName?: string; status?: unknown } | undefined): string | undefined {
+  if (!transaction) {
+    return undefined;
+  }
+
+  const names = transactionsStatusNumberToName as Record<string, string>;
+  return (
+    transaction.statusName ??
+    names[String(transaction.status)] ??
+    (transaction.status === undefined ? undefined : String(transaction.status))
+  );
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -823,7 +837,7 @@ async function writeContract(input: z.infer<z.ZodObject<typeof writeInputShape>>
     ok: succeeded,
     error: succeeded
       ? undefined
-      : `Transaction was not accepted: status=${receipt?.statusName ?? "unknown"}, executionResult=${receipt?.txExecutionResultName ?? "unknown"}`,
+      : `Transaction was not accepted: status=${statusNameOf(receipt) ?? "unknown"}, executionResult=${receipt?.txExecutionResultName ?? "unknown"}`,
     chain: input.chain,
     contractAddress: input.contractAddress,
     method: input.method,
@@ -833,7 +847,7 @@ async function writeContract(input: z.infer<z.ZodObject<typeof writeInputShape>>
     feeValue: fees?.feeValue,
     feeEstimateError,
     transactionHash,
-    transactionStatus: receipt?.statusName ?? receipt?.status,
+    transactionStatus: statusNameOf(receipt),
     executionResult: receipt?.txExecutionResultName,
     receipt
   };
@@ -885,7 +899,7 @@ async function inspectTransaction(input: z.infer<z.ZodObject<typeof transactionI
     ok: true,
     chain: input.chain,
     hash: input.hash,
-    transactionStatus: transaction.statusName,
+    transactionStatus: statusNameOf(transaction),
     executionResult: transaction.txExecutionResultName,
     successful: isSuccessful(transaction),
     ...sections,
@@ -1000,7 +1014,7 @@ async function checkCommand(command: string, args: string[] = ["--version"]) {
 
 const server = new McpServer({
   name: "genlayer-cli-mcp",
-  version: "0.3.0"
+  version: "0.3.1"
 });
 
 server.tool(
