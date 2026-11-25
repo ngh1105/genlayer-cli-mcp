@@ -1,6 +1,6 @@
 {
   "name": "genlayer-cli-mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "MCP server exposing GenLayer CLI and GenVM linter commands.",
   "type": "module",
   "bin": {

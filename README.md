@@ -210,6 +210,8 @@ Requires `genlayer-js` 2.x. `receiptStatus: "ACCEPTED"` waits until consensus de
 
 Fees: public networks have the fee policy enabled, so a deploy with no fee deposit reverts with `FeeValueMustBeNonZero`. By default (`autoEstimateFees: true`) the tool calls `estimateTransactionFees()` and attaches the estimate; pass `fees` to supply your own genlayer-js fee options. The account must hold enough balance to cover `feeValue`.
 
+Funding: `fundAmount` is in GEN. With `autoFundLocalnet` the deploying account is funded through the `sim_fundAccount` faucet before deploy, always on localnet and on Studio networks when the key was generated.
+
 ### SDK tools (genlayer-js 2.x)
 
 Structured tools that talk to the network through `genlayer-js` and return JSON. They take `chain` (default `localnet`), optional `rpcUrl`, and `timeoutMs`. Read-only tools need no key.
