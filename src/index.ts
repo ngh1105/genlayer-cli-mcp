@@ -96,8 +96,10 @@ const deployInputShape = {
   autoFundLocalnet: z
     .boolean()
     .default(true)
-    .describe("Call localnet sim_fundAccount before deploy. Only works on localnet."),
-  fundAmount: z.number().positive().default(10),
+    .describe(
+      "Fund the deploying account with the sim_fundAccount faucet before deploy: always on localnet, and on Studio networks when the key was generated."
+    ),
+  fundAmount: z.number().positive().default(10).describe("Faucet amount in GEN."),
   waitForReceipt: z.boolean().default(true),
   receiptStatus: z
     .enum(["ACCEPTED", "FINALIZED"])
@@ -334,13 +336,18 @@ async function deployWithSdk(input: z.infer<typeof deployInputSchema>) {
   const deployOperation = async () => {
     let funded = false;
     let fundingError: string | undefined;
-    if (input.autoFundLocalnet && input.chain === "localnet") {
+    // A generated key starts empty, so it also needs the faucet on hosted Studio networks.
+    const shouldFund =
+      input.autoFundLocalnet &&
+      (input.chain === "localnet" || (generatedPrivateKey && chains[input.chain].isStudio));
+    if (shouldFund) {
       try {
-        await (client as unknown as { fundAccount(args: { address: string; amount: number }): Promise<unknown> })
-          .fundAccount({
-            address: account.address,
-            amount: input.fundAmount
-          });
+        // sim_fundAccount takes wei; round to gwei to stay exact for fractional GEN.
+        const wei = BigInt(Math.round(input.fundAmount * 1e9)) * 10n ** 9n;
+        await (client as unknown as { request(args: { method: string; params: unknown[] }): Promise<unknown> }).request({
+          method: "sim_fundAccount",
+          params: [account.address, Number(wei)]
+        });
         funded = true;
       } catch (error) {
         fundingError = error instanceof Error ? error.message : String(error);
@@ -1474,7 +1481,7 @@ async function checkCommand(command: string, args: string[] = ["--version"]) {
 
 const server = new McpServer({
   name: "genlayer-cli-mcp",
-  version: "0.4.0"
+  version: "0.4.1"
 });
 
 server.tool(
