@@ -24,6 +24,12 @@ try {
   });
   console.log(JSON.stringify({ check_tools: checkTools.content }, null, 2));
 
+  const networks = await client.callTool({
+    name: "genlayer_networks",
+    arguments: {}
+  });
+  console.log(JSON.stringify({ genlayer_networks: networks.content }, null, 2));
+
   const genlayerVersion = await client.callTool({
     name: "genlayer",
     arguments: {

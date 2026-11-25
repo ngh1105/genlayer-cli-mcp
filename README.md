@@ -8,6 +8,7 @@ It exposes:
 - `genvm_lint`: access to `genvm-lint`
 - `genlayer_deploy`: deploys contracts with `genlayer-js`
 - `check_tools`: verifies local tool availability and private key config
+- `genlayer_networks`, `genlayer_estimate_fees`, `genlayer_call`, `genlayer_write`, `genlayer_transaction`, `genlayer_contract_info`, `genlayer_transaction_action`: structured `genlayer-js` tools
 
 The server uses stdio transport and executes commands with `spawn(command, args)`.
 
@@ -189,7 +190,6 @@ Optional fields:
   "cwd": "E:\\project",
   "leaderOnly": false,
   "consensusMaxRotations": 5,
-  "initializeConsensus": true,
   "fundAmount": 10,
   "receiptRetries": 50,
   "receiptIntervalMs": 5000,
@@ -201,8 +201,40 @@ Supported chains:
 
 - `localnet`
 - `studionet`
+- `studioDevnet` (preview Studio deployment)
 - `testnetAsimov`
 - `testnetBradbury`
+
+Requires `genlayer-js` 2.x. `receiptStatus: "ACCEPTED"` waits until consensus decides the transaction; the result has `ok: false` with `transactionStatus` and `executionResult` when the deploy was decided but not accepted (undetermined, timeout, or failed execution). `initializeConsensus` is deprecated and ignored.
+
+Fees: public networks have the fee policy enabled, so a deploy with no fee deposit reverts with `FeeValueMustBeNonZero`. By default (`autoEstimateFees: true`) the tool calls `estimateTransactionFees()` and attaches the estimate; pass `fees` to supply your own genlayer-js fee options. The account must hold enough balance to cover `feeValue`.
+
+### SDK tools (genlayer-js 2.x)
+
+Structured tools that talk to the network through `genlayer-js` and return JSON. They take `chain` (default `localnet`), optional `rpcUrl`, and `timeoutMs`. Signing tools use `privateKey` or `GENLAYER_PRIVATE_KEY`; read-only tools need no key.
+
+| Tool | Changes state | Purpose |
+| --- | --- | --- |
+| `genlayer_networks` | no | List built-in networks: chain id, RPC URL, explorer, protocol contract addresses. |
+| `genlayer_estimate_fees` | no | Estimate transaction fees. Returns a `fees` object for `genlayer_deploy` / `genlayer_write`. With `contractAddress` and `method` it sizes the estimate from a write simulation (Studio and localnet only). |
+| `genlayer_call` | no | Call a read-only contract method. |
+| `genlayer_write` | yes | Send a transaction to a contract method. Estimates fees automatically; `ok` is true only when consensus accepted the transaction. |
+| `genlayer_transaction` | no | Inspect a transaction: status, execution result, plus optional `include` sections `lifecycle`, `trace`, `appeal`, `triggered`, `queue`. |
+| `genlayer_contract_info` | no | Schema of a deployed contract (`contractAddress`, optional `includeCode`) or of a local file (`contractPath`, Studio and localnet only). |
+| `genlayer_transaction_action` | yes | `appeal`, `finalize`, or `cancel` a transaction. Appeals spend funds. |
+
+Arguments (`args`, `kwargs`) are plain JSON. Use string prefixes for types JSON lacks: `"addr#<40 hex>"` for an address, `"b#<hex>"` for bytes, `"int#<digits>"` for integers beyond 2^53.
+
+```json
+{
+  "chain": "studionet",
+  "contractAddress": "0x...",
+  "method": "transfer",
+  "args": ["addr#0123456789abcdef0123456789abcdef01234567", "int#1000000000000000000"]
+}
+```
+
+Staking, vesting, custom network profiles, and keystore accounts stay on the `genlayer` CLI tool, for example `{"args": ["staking", "validators"]}` or `{"args": ["network", "list"]}`.
 
 ## Agent Setup Examples
 
