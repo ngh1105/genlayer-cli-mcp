@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { cwd as processCwd, env as processEnv } from "node:process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -58,7 +59,13 @@ const deployInputShape = {
   privateKey: z
     .string()
     .optional()
-    .describe("GenLayer private key. If missing or invalid, a new private key is generated with genlayer-js."),
+    .describe(
+      "GenLayer private key. When no key, keystore account, or environment key resolves, a new private key is generated."
+    ),
+  account: z
+    .string()
+    .optional()
+    .describe("GenLayer CLI keystore account name to sign with. The account must be unlocked."),
   args: z
     .array(z.unknown())
     .default([])
@@ -306,12 +313,11 @@ async function deployWithSdk(input: z.infer<typeof deployInputSchema>) {
     throw new Error(`Contract file not found: ${contractPath}`);
   }
 
-  const configuredPrivateKey = getConfiguredPrivateKey();
-  const selectedPrivateKey = input.privateKey ?? configuredPrivateKey.value;
-  const normalizedPrivateKey = normalizePrivateKey(selectedPrivateKey);
-  const providedPrivateKeyValid = Boolean(normalizedPrivateKey);
-  const generatedPrivateKey = !providedPrivateKeyValid;
-  const privateKey = (normalizedPrivateKey ?? generatePrivateKey()) as `0x${string}`;
+  // An invalid privateKey input keeps its documented meaning: deploy with a fresh key.
+  const signer: Signer =
+    input.privateKey !== undefined && !normalizePrivateKey(input.privateKey) ? {} : await resolveSigner(input);
+  const generatedPrivateKey = !signer.privateKey;
+  const privateKey = signer.privateKey ?? generatePrivateKey();
   const account = createAccount(privateKey);
   const contractCode = readFileSync(contractPath, "utf8");
 
@@ -383,11 +389,7 @@ async function deployWithSdk(input: z.infer<typeof deployInputSchema>) {
       chain: input.chain,
       rpcUrl: input.rpcUrl,
       accountAddress: account.address,
-      privateKeySource: providedPrivateKeyValid
-        ? input.privateKey
-          ? "input"
-          : configuredPrivateKey.source
-        : "generated",
+      privateKeySource: signer.source ?? "generated",
       privateKey: generatedPrivateKey || input.exposePrivateKey ? privateKey : undefined,
       privateKeyExposed: generatedPrivateKey || input.exposePrivateKey,
       deployAttempted: true,
@@ -435,21 +437,6 @@ function normalizePrivateKey(privateKey: string | undefined): `0x${string}` | un
   }
 
   return undefined;
-}
-
-function getPrivateKeyConfigStatus() {
-  const configuredPrivateKey = getConfiguredPrivateKey();
-  const normalizedPrivateKey = normalizePrivateKey(configuredPrivateKey.value);
-
-  return {
-    source: configuredPrivateKey.source,
-    configured: Boolean(configuredPrivateKey.value),
-    valid: Boolean(normalizedPrivateKey),
-    willGenerateOnDeploy: !normalizedPrivateKey,
-    note: normalizedPrivateKey
-      ? "genlayer_deploy will use the configured private key."
-      : "genlayer_deploy will generate a new private key and deploy with it."
-  };
 }
 
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
@@ -519,7 +506,13 @@ const signerShape = {
   privateKey: z
     .string()
     .optional()
-    .describe("Private key used to sign. Defaults to GENLAYER_PRIVATE_KEY from the MCP server environment.")
+    .describe(
+      "Private key used to sign. Defaults to GENLAYER_PRIVATE_KEY, then the active unlocked GenLayer CLI keystore account."
+    ),
+  account: z
+    .string()
+    .optional()
+    .describe("GenLayer CLI keystore account name to sign with (see genlayer_account). The account must be unlocked.")
 };
 
 const callShape = {
@@ -653,21 +646,20 @@ async function resolveFees(
   }
 }
 
-function makeClient(
-  input: { chain: (typeof chainNames)[number]; rpcUrl?: string; privateKey?: string },
+async function makeClient(
+  input: { chain: (typeof chainNames)[number]; rpcUrl?: string; privateKey?: string; account?: string },
   mode: "read" | "sign"
 ) {
-  const configuredPrivateKey = getConfiguredPrivateKey();
-  const privateKey = normalizePrivateKey(input.privateKey ?? configuredPrivateKey.value);
+  const signer = await resolveSigner(input);
 
-  if (!privateKey && mode === "sign") {
+  if (!signer.privateKey && mode === "sign") {
     throw new Error(
-      "A valid private key is required: pass privateKey or set GENLAYER_PRIVATE_KEY in the MCP server environment."
+      "No signer available: pass privateKey or account, set GENLAYER_PRIVATE_KEY, or unlock the active GenLayer CLI account (genlayer account unlock)."
     );
   }
 
   // Read-only calls still need a sender address; an ephemeral one is enough.
-  const account = createAccount(privateKey ?? generatePrivateKey());
+  const account = createAccount(signer.privateKey ?? generatePrivateKey());
   const client = createClient({
     chain: chains[input.chain],
     endpoint: input.rpcUrl,
@@ -677,7 +669,7 @@ function makeClient(
   return {
     client,
     account,
-    privateKeySource: privateKey ? (input.privateKey ? "input" : configuredPrivateKey.source) : "ephemeral"
+    privateKeySource: signer.source ?? "ephemeral"
   };
 }
 
@@ -730,7 +722,7 @@ const estimateFeesShape = {
 };
 
 async function estimateFees(input: z.infer<z.ZodObject<typeof estimateFeesShape>>) {
-  const { client } = makeClient(input, "read");
+  const { client } = await makeClient(input, "read");
   const options = (input.feeOptions ?? {}) as NonNullable<Parameters<typeof client.estimateTransactionFees>[0]>;
   const targeted = Boolean(input.contractAddress && input.method);
 
@@ -766,7 +758,7 @@ const callInputShape = {
 };
 
 async function callContract(input: z.infer<z.ZodObject<typeof callInputShape>>) {
-  const { client } = makeClient(input, "read");
+  const { client } = await makeClient(input, "read");
   const result = await client.readContract({
     address: input.contractAddress as Address,
     functionName: input.method,
@@ -796,7 +788,7 @@ const writeInputShape = {
 };
 
 async function writeContract(input: z.infer<z.ZodObject<typeof writeInputShape>>) {
-  const { client, account, privateKeySource } = makeClient(input, "sign");
+  const { client, account, privateKeySource } = await makeClient(input, "sign");
   const call = {
     address: input.contractAddress as Address,
     functionName: input.method,
@@ -868,7 +860,7 @@ const transactionInputShape = {
 };
 
 async function inspectTransaction(input: z.infer<z.ZodObject<typeof transactionInputShape>>) {
-  const { client } = makeClient(input, "read");
+  const { client } = await makeClient(input, "read");
   const hash = input.hash as Parameters<typeof client.getTransaction>[0]["hash"];
   const transaction = await client.getTransaction({ hash });
 
@@ -923,7 +915,7 @@ async function contractInfo(input: z.infer<z.ZodObject<typeof contractInfoShape>
     throw new Error("Provide exactly one of contractAddress or contractPath.");
   }
 
-  const { client } = makeClient(input, "read");
+  const { client } = await makeClient(input, "read");
 
   if (input.contractPath) {
     const contractPath = resolve(input.cwd ?? processCwd(), input.contractPath);
@@ -954,15 +946,21 @@ const transactionActionShape = {
   ...signerShape,
   hash: hashSchema.describe("GenLayer transaction hash."),
   action: z
-    .enum(["appeal", "finalize", "cancel"])
+    .enum(["appeal", "finalize", "cancel", "topUpFees", "topUpAndAppeal"])
     .describe(
-      "appeal: submit an appeal (pays the appeal charge). finalize: finalize a transaction that is ready. cancel: cancel a pending transaction (Studio and localnet only)."
+      "appeal: submit an appeal (pays the appeal charge). finalize: finalize a transaction that is ready. cancel: cancel a pending transaction (Studio and localnet only). topUpFees: add fee budget to a transaction. topUpAndAppeal: add fee budget and appeal in one transaction."
     ),
-  value: weiSchema.describe("Appeal only: value in wei. Defaults to the SDK-computed appeal charge.")
+  value: weiSchema.describe(
+    "Value in wei. appeal: defaults to the SDK-computed appeal charge. topUpFees: defaults to the estimated fee value."
+  ),
+  feeOptions: z
+    .record(z.unknown())
+    .optional()
+    .describe("topUpFees / topUpAndAppeal: fee estimate options used to build the fee distribution, e.g. { appealRounds }.")
 };
 
 async function transactionAction(input: z.infer<z.ZodObject<typeof transactionActionShape>>) {
-  const { client, account, privateKeySource } = makeClient(input, "sign");
+  const { client, account, privateKeySource } = await makeClient(input, "sign");
   const txId = input.hash as Address;
 
   let result: unknown;
@@ -974,6 +972,20 @@ async function transactionAction(input: z.infer<z.ZodObject<typeof transactionAc
     });
   } else if (input.action === "finalize") {
     result = await client.finalizeTransaction({ account, txId });
+  } else if (input.action === "topUpFees" || input.action === "topUpAndAppeal") {
+    const estimate = await client.estimateTransactionFees(
+      (input.feeOptions ?? {}) as NonNullable<Parameters<typeof client.estimateTransactionFees>[0]>
+    );
+    const value = input.value === undefined ? undefined : BigInt(input.value);
+    result =
+      input.action === "topUpFees"
+        ? await client.topUpFees({
+            account,
+            txId,
+            distribution: estimate.distribution,
+            value: value ?? estimate.feeValue
+          })
+        : await client.topUpAndSubmitAppeal({ account, txId, distribution: estimate.distribution, value });
   } else {
     result = await client.cancelTransaction({
       hash: txId as Parameters<typeof client.cancelTransaction>[0]["hash"]
@@ -988,6 +1000,454 @@ async function transactionAction(input: z.infer<z.ZodObject<typeof transactionAc
     accountAddress: account.address,
     privateKeySource,
     result
+  };
+}
+
+const GENLAYER_HOME = join(homedir(), ".genlayer");
+const KEYCHAIN_SERVICE = "genlayer-cli";
+
+type KeystoreAccount = { name: string; address?: string };
+
+function listKeystoreAccounts(): KeystoreAccount[] {
+  const directory = join(GENLAYER_HOME, "keystores");
+  if (!existsSync(directory)) {
+    return [];
+  }
+
+  return readdirSync(directory)
+    .filter((file) => file.endsWith(".json"))
+    .map((file) => {
+      const name = file.slice(0, -".json".length);
+      try {
+        const keystore = JSON.parse(readFileSync(join(directory, file), "utf8")) as { address?: string };
+        const address = keystore.address
+          ? keystore.address.startsWith("0x")
+            ? keystore.address
+            : `0x${keystore.address}`
+          : undefined;
+        return { name, address };
+      } catch {
+        return { name };
+      }
+    });
+}
+
+function getActiveKeystoreAccount(): string | undefined {
+  try {
+    const config = JSON.parse(readFileSync(join(GENLAYER_HOME, "genlayer-config.json"), "utf8")) as {
+      activeAccount?: string;
+    };
+    return config.activeAccount;
+  } catch {
+    return undefined;
+  }
+}
+
+type Keytar = { getPassword(service: string, account: string): Promise<string | null> };
+
+let keytarPromise: Promise<Keytar | undefined> | undefined;
+
+// keytar is an optional native dependency; without it the keystore fallback is simply unavailable.
+function loadKeytar(): Promise<Keytar | undefined> {
+  keytarPromise ??= import("keytar")
+    .then((module) => ((module as { default?: Keytar }).default ?? module) as Keytar)
+    .catch(() => undefined);
+  return keytarPromise;
+}
+
+async function readUnlockedKey(accountName: string): Promise<`0x${string}` | undefined> {
+  const keytar = await loadKeytar();
+  if (!keytar) {
+    return undefined;
+  }
+
+  try {
+    return normalizePrivateKey((await keytar.getPassword(KEYCHAIN_SERVICE, `account:${accountName}`)) ?? undefined);
+  } catch {
+    return undefined;
+  }
+}
+
+async function readKeystorePrivateKey(accountName: string): Promise<`0x${string}`> {
+  const accounts = listKeystoreAccounts();
+  const entry = accounts.find((account) => account.name === accountName);
+  if (!entry) {
+    const available = accounts.map((account) => account.name).join(", ") || "none";
+    throw new Error(`Account "${accountName}" not found in the GenLayer CLI keystore. Available: ${available}.`);
+  }
+
+  if (!(await loadKeytar())) {
+    throw new Error("OS keychain support (optional dependency keytar) is not available to this MCP server.");
+  }
+
+  const privateKey = await readUnlockedKey(accountName);
+  if (!privateKey) {
+    throw new Error(`Account "${accountName}" is locked. Run: genlayer account unlock --account ${accountName}`);
+  }
+
+  if (entry.address && createAccount(privateKey).address.toLowerCase() !== entry.address.toLowerCase()) {
+    throw new Error(`Keychain entry for "${accountName}" does not match the keystore address ${entry.address}.`);
+  }
+
+  return privateKey;
+}
+
+type Signer = { privateKey?: `0x${string}`; source?: string };
+
+// Precedence: explicit privateKey, explicit keystore account, environment, active unlocked keystore account.
+async function resolveSigner(input: { privateKey?: string; account?: string }): Promise<Signer> {
+  if (input.privateKey !== undefined) {
+    const privateKey = normalizePrivateKey(input.privateKey);
+    if (!privateKey) {
+      throw new Error("privateKey is not a valid 32-byte hex private key.");
+    }
+
+    return { privateKey, source: "input" };
+  }
+
+  if (input.account) {
+    return { privateKey: await readKeystorePrivateKey(input.account), source: `keystore:${input.account}` };
+  }
+
+  const configured = getConfiguredPrivateKey();
+  const environmentKey = normalizePrivateKey(configured.value);
+  if (environmentKey) {
+    return { privateKey: environmentKey, source: configured.source };
+  }
+
+  const activeAccount = getActiveKeystoreAccount();
+  if (activeAccount) {
+    const privateKey = await readUnlockedKey(activeAccount);
+    if (privateKey) {
+      return { privateKey, source: `keystore:${activeAccount}` };
+    }
+  }
+
+  return {};
+}
+
+async function getPrivateKeyConfigStatus() {
+  const configuredPrivateKey = getConfiguredPrivateKey();
+  const environmentValid = Boolean(normalizePrivateKey(configuredPrivateKey.value));
+  const activeAccount = getActiveKeystoreAccount();
+  const keychainAvailable = Boolean(await loadKeytar());
+  const accounts = await Promise.all(
+    listKeystoreAccounts().map(async (account) => ({
+      ...account,
+      active: account.name === activeAccount,
+      unlocked: Boolean(await readUnlockedKey(account.name))
+    }))
+  );
+  const signer = await resolveSigner({}).catch(() => ({}) as Signer);
+
+  return {
+    source: signer.source ?? configuredPrivateKey.source,
+    configured: Boolean(configuredPrivateKey.value),
+    valid: environmentValid,
+    keychainAvailable,
+    keystoreAccounts: accounts,
+    defaultSigner: signer.privateKey ? createAccount(signer.privateKey).address : undefined,
+    willGenerateOnDeploy: !signer.privateKey,
+    note: signer.privateKey
+      ? `Signing tools use ${signer.source} by default.`
+      : "No signer available: genlayer_deploy will generate a new private key; other signing tools need privateKey, account, or GENLAYER_PRIVATE_KEY."
+  };
+}
+
+function parseGen(amount: string): bigint {
+  const match = /^(\d+)(?:\.(\d{1,18}))?$/.exec(amount.trim());
+  if (!match) {
+    throw new Error(`Invalid GEN amount "${amount}". Use a decimal such as "1" or "0.25" (up to 18 decimals).`);
+  }
+
+  return BigInt(match[1]) * 10n ** 18n + BigInt((match[2] ?? "").padEnd(18, "0"));
+}
+
+function formatGen(wei: bigint): string {
+  const whole = wei / 10n ** 18n;
+  const fraction = (wei % 10n ** 18n).toString().padStart(18, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
+const genAmountSchema = z.string().regex(/^\d+(\.\d{1,18})?$/, 'Expected a GEN amount such as "1" or "0.25".');
+
+const accountTargetShape = {
+  account: signerShape.account,
+  address: addressSchema.optional().describe("Address to use instead of a keystore account.")
+};
+
+async function resolveTargetAddress(input: { address?: string; account?: string; privateKey?: string }) {
+  if (input.address) {
+    return input.address as Address;
+  }
+
+  if (input.account) {
+    const entry = listKeystoreAccounts().find((account) => account.name === input.account);
+    if (entry?.address) {
+      return entry.address as Address;
+    }
+  }
+
+  const signer = await resolveSigner(input);
+  if (!signer.privateKey) {
+    throw new Error("No address given and no default signer available: pass address or account.");
+  }
+
+  return createAccount(signer.privateKey).address;
+}
+
+const accountInfoShape = {
+  ...connectionShape,
+  ...accountTargetShape
+};
+
+async function accountInfo(input: z.infer<z.ZodObject<typeof accountInfoShape>>) {
+  const activeAccount = getActiveKeystoreAccount();
+  const keystoreAccounts = await Promise.all(
+    listKeystoreAccounts().map(async (account) => ({
+      ...account,
+      active: account.name === activeAccount,
+      unlocked: Boolean(await readUnlockedKey(account.name))
+    }))
+  );
+
+  const address = await resolveTargetAddress(input).catch(() => undefined);
+  let balance: bigint | undefined;
+  let balanceError: string | undefined;
+  if (address) {
+    try {
+      const { client } = await makeClient(input, "read");
+      balance = await client.getBalance({ address });
+    } catch (error) {
+      balanceError = errorMessage(error);
+    }
+  }
+
+  return {
+    ok: true,
+    chain: input.chain,
+    address,
+    balanceWei: balance,
+    balanceGen: balance === undefined ? undefined : formatGen(balance),
+    balanceError,
+    keystoreAccounts
+  };
+}
+
+const fundAccountShape = {
+  ...connectionShape,
+  ...accountTargetShape,
+  amount: genAmountSchema.default("10").describe("Amount of test GEN to mint to the account.")
+};
+
+async function fundAccount(input: z.infer<z.ZodObject<typeof fundAccountShape>>) {
+  if (!chains[input.chain].isStudio) {
+    throw new Error(`${input.chain} has no sim_fundAccount faucet; it only exists on localnet and Studio networks.`);
+  }
+
+  const address = await resolveTargetAddress(input);
+  const { client } = await makeClient(input, "read");
+  const wei = parseGen(input.amount);
+  await (client as unknown as { request(args: { method: string; params: unknown[] }): Promise<unknown> }).request({
+    method: "sim_fundAccount",
+    params: [address, Number(wei)]
+  });
+  const balance = await client.getBalance({ address });
+
+  return {
+    ok: true,
+    chain: input.chain,
+    address,
+    fundedGen: input.amount,
+    balanceWei: balance,
+    balanceGen: formatGen(balance)
+  };
+}
+
+const transferShape = {
+  ...connectionShape,
+  ...signerShape,
+  to: addressSchema.describe("Recipient address."),
+  amount: genAmountSchema.describe('Amount of GEN to send, e.g. "0.5".')
+};
+
+async function transferGen(input: z.infer<z.ZodObject<typeof transferShape>>) {
+  const { client, account, privateKeySource } = await makeClient(input, "sign");
+  const receipt = await client.transfer({ to: input.to as Address, value: parseGen(input.amount) });
+
+  return {
+    ok: receipt.status === "success",
+    chain: input.chain,
+    from: account.address,
+    to: input.to,
+    amountGen: input.amount,
+    privateKeySource,
+    transactionHash: receipt.transactionHash,
+    status: receipt.status
+  };
+}
+
+const simulateWriteShape = {
+  ...connectionShape,
+  ...signerShape,
+  ...callShape,
+  value: weiSchema.describe("Native value sent with the call, in wei."),
+  leaderOnly: z.boolean().default(false),
+  includeFeeEstimate: z.boolean().default(true).describe("Also size the fees this write would need.")
+};
+
+async function simulateWrite(input: z.infer<z.ZodObject<typeof simulateWriteShape>>) {
+  const { client, account } = await makeClient(input, "read");
+  const call = {
+    address: input.contractAddress as Address,
+    functionName: input.method,
+    args: toCalldataArgs(input.args),
+    kwargs: toCalldataKwargs(input.kwargs),
+    value: input.value === undefined ? undefined : BigInt(input.value),
+    leaderOnly: input.leaderOnly
+  };
+
+  const simulation = await client.simulateWriteContract({ ...call, includeReceipt: true });
+
+  let fees: unknown;
+  let feeEstimateError: string | undefined;
+  if (input.includeFeeEstimate) {
+    try {
+      const estimate = await client.estimateTransactionFeesForWrite(call);
+      fees = {
+        distribution: estimate.distribution,
+        messageAllocations: estimate.messageAllocations,
+        feeValue: estimate.feeValue
+      };
+    } catch (error) {
+      feeEstimateError = errorMessage(error);
+    }
+  }
+
+  return {
+    ok: true,
+    chain: input.chain,
+    contractAddress: input.contractAddress,
+    method: input.method,
+    sender: account.address,
+    result: simulation.result,
+    fees,
+    feeEstimateError,
+    feeReport: simulation.feeReport,
+    receipt: simulation.receipt
+  };
+}
+
+const stakingQueries = ["epoch", "validators", "validator", "delegation", "quarantined", "banned"] as const;
+
+const stakingInfoShape = {
+  ...connectionShape,
+  query: z
+    .enum(stakingQueries)
+    .default("epoch")
+    .describe(
+      "epoch: current epoch and staking parameters. validators: active and joined validator addresses. validator: details for one validator. delegation: a delegator's stake with a validator. quarantined / banned: those validator lists."
+    ),
+  validator: addressSchema.optional().describe("Validator address (validator and delegation queries)."),
+  delegator: addressSchema.optional().describe("Delegator address (delegation query).")
+};
+
+async function stakingInfo(input: z.infer<z.ZodObject<typeof stakingInfoShape>>) {
+  if (!chains[input.chain].stakingContract) {
+    throw new Error(`${input.chain} has no staking contract; staking exists on testnetAsimov and testnetBradbury.`);
+  }
+
+  const { client } = await makeClient(input, "read");
+  const requireValidator = () => {
+    if (!input.validator) {
+      throw new Error(`The ${input.query} query needs a validator address.`);
+    }
+
+    return input.validator as Address;
+  };
+
+  let result: unknown;
+  switch (input.query) {
+    case "epoch":
+      result = await client.getEpochInfo();
+      break;
+    case "validators": {
+      const [active, joined] = await Promise.all([client.getActiveValidators(), client.getJoinedValidators()]);
+      result = { activeCount: active.length, joinedCount: joined.length, active, joined };
+      break;
+    }
+    case "validator": {
+      const validator = requireValidator();
+      result = (await client.isValidator(validator))
+        ? { isValidator: true, info: await client.getValidatorInfo(validator) }
+        : { isValidator: false };
+      break;
+    }
+    case "delegation": {
+      if (!input.delegator) {
+        throw new Error("The delegation query needs a delegator address.");
+      }
+
+      result = await client.getStakeInfo(input.delegator as Address, requireValidator());
+      break;
+    }
+    case "quarantined":
+      result = await client.getQuarantinedValidators();
+      break;
+    case "banned":
+      result = await client.getBannedValidators();
+      break;
+  }
+
+  return {
+    ok: true,
+    chain: input.chain,
+    query: input.query,
+    result
+  };
+}
+
+const lintContractShape = {
+  contractPath: z.string().describe("Path to the Intelligent Contract source file."),
+  cwd: z.string().optional().describe("Base directory for resolving contractPath. Defaults to MCP server cwd."),
+  mode: z
+    .enum(["check", "lint", "validate", "typecheck", "schema"])
+    .default("check")
+    .describe(
+      "check: lint plus validate. lint: fast AST safety checks. validate: SDK semantic validation. typecheck: Pyright with the GenLayer SDK. schema: extract the ABI schema."
+    ),
+  timeoutMs: z.number().int().positive().max(30 * 60 * 1000).default(180_000)
+};
+
+async function lintContract(input: z.infer<z.ZodObject<typeof lintContractShape>>) {
+  const contractPath = resolve(input.cwd ?? processCwd(), input.contractPath);
+  if (!existsSync(contractPath)) {
+    throw new Error(`Contract file not found: ${contractPath}`);
+  }
+
+  const result = await runCommand("genvm-lint", {
+    args: [input.mode, contractPath, "--json"],
+    cwd: input.cwd,
+    timeoutMs: input.timeoutMs
+  });
+
+  let report: unknown;
+  try {
+    report = JSON.parse(result.stdout);
+  } catch {
+    report = undefined;
+  }
+
+  return {
+    ok: result.exitCode === 0,
+    mode: input.mode,
+    contractPath,
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    report,
+    stdout: report === undefined ? result.stdout : undefined,
+    stderr: result.stderr || undefined,
+    error: result.error
   };
 }
 
@@ -1014,7 +1474,7 @@ async function checkCommand(command: string, args: string[] = ["--version"]) {
 
 const server = new McpServer({
   name: "genlayer-cli-mcp",
-  version: "0.3.1"
+  version: "0.4.0"
 });
 
 server.tool(
@@ -1052,7 +1512,7 @@ server.tool(
 
     return textResponse({
       cwd: processCwd(),
-      privateKeyConfig: getPrivateKeyConfigStatus(),
+      privateKeyConfig: await getPrivateKeyConfigStatus(),
       checks
     });
   }
@@ -1105,6 +1565,48 @@ server.tool(
   "Appeal, finalize, or cancel a GenLayer transaction. State-changing: signs with the configured private key and may spend funds.",
   transactionActionShape,
   async (input) => textResponse(await safeOperation(input.timeoutMs, () => transactionAction(input)))
+);
+
+server.tool(
+  "genlayer_account",
+  "Show an account's address and GEN balance on a network, plus the GenLayer CLI keystore accounts and whether each is unlocked (read-only). Defaults to the signer this server would use.",
+  accountInfoShape,
+  async (input) => textResponse(await safeOperation(input.timeoutMs, () => accountInfo(input)))
+);
+
+server.tool(
+  "genlayer_fund_account",
+  "Mint test GEN to an account with the sim_fundAccount faucet. Only works on localnet and Studio networks.",
+  fundAccountShape,
+  async (input) => textResponse(await safeOperation(input.timeoutMs, () => fundAccount(input)))
+);
+
+server.tool(
+  "genlayer_transfer",
+  "Send GEN to an address. State-changing: signs with the resolved account and spends funds.",
+  transferShape,
+  async (input) => textResponse(await safeOperation(input.timeoutMs, () => transferGen(input)))
+);
+
+server.tool(
+  "genlayer_simulate_write",
+  "Dry-run a state-changing contract method without sending a transaction: returns the result, a fee estimate, and the simulation receipt. Studio and localnet only.",
+  simulateWriteShape,
+  async (input) => textResponse(await safeOperation(input.timeoutMs, () => simulateWrite(input)))
+);
+
+server.tool(
+  "genlayer_staking_info",
+  "Read staking state on testnets (read-only): epoch parameters, validator lists, one validator's details, or a delegation.",
+  stakingInfoShape,
+  async (input) => textResponse(await safeOperation(input.timeoutMs, () => stakingInfo(input)))
+);
+
+server.tool(
+  "genlayer_lint_contract",
+  "Lint, validate, typecheck, or extract the schema of an Intelligent Contract file with genvm-lint and return the JSON report.",
+  lintContractShape,
+  async (input) => textResponse(await safeOperation(input.timeoutMs, () => lintContract(input)))
 );
 
 const transport = new StdioServerTransport();
